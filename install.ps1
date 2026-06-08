@@ -62,13 +62,6 @@ if (Test-Path "$extDir\themes") {
     exit 1
 }
 
-# Remove extensions.json so VS Code rebuilds it cleanly on next launch
-# (previous versions of this script wrote invalid content to this file)
-$extJsonPath = "$env:USERPROFILE\.vscode\extensions\extensions.json"
-if (Test-Path $extJsonPath) {
-    Remove-Item $extJsonPath -Force
-    Write-Host "Cleared extensions.json (VS Code will rebuild it)" -ForegroundColor Green
-}
 
 Write-Host ""
 Write-Host "Step 2: Installing Custom UI Style extension..."
@@ -87,6 +80,17 @@ $fontDir = "$env:LOCALAPPDATA\Microsoft\Windows\Fonts"
 # Try user fonts first
 if (-not (Test-Path $fontDir)) {
     New-Item -ItemType Directory -Path $fontDir -Force | Out-Null
+}
+
+# Track which fonts already existed (for clean uninstall)
+$fontPreExistence = @{}
+$fontFiles = Get-ChildItem "$scriptDir\fonts\*.otf" -ErrorAction SilentlyContinue
+foreach ($f in $fontFiles) {
+    $destPath = Join-Path $fontDir $f.Name
+    $fontPreExistence[$f.Name] = @{
+        wasPresentBeforeInstall = (Test-Path $destPath)
+        installedPath = $destPath
+    }
 }
 
 try {
@@ -116,18 +120,176 @@ if (-not (Test-Path $settingsDir)) {
 
 $settingsFile = Join-Path $settingsDir "settings.json"
 
-# Backup existing settings if they exist
+# Strip JSONC features (comments, trailing commas) so ConvertFrom-Json can parse.
+# Uses a character-by-character approach to avoid stripping // inside quoted strings.
+function Strip-Jsonc {
+    param([string]$Text)
+    $result = [System.Text.StringBuilder]::new($Text.Length)
+    $inString = $false
+    $escaped = $false
+    $i = 0
+    while ($i -lt $Text.Length) {
+        $c = $Text[$i]
+        if ($escaped) {
+            [void]$result.Append($c)
+            $escaped = $false
+            $i++
+            continue
+        }
+        if ($c -eq '\' -and $inString) {
+            [void]$result.Append($c)
+            $escaped = $true
+            $i++
+            continue
+        }
+        if ($c -eq '"') {
+            $inString = -not $inString
+            [void]$result.Append($c)
+            $i++
+            continue
+        }
+        if (-not $inString) {
+            # Single-line comment: skip to end of line
+            if ($c -eq '/' -and ($i + 1) -lt $Text.Length -and $Text[$i + 1] -eq '/') {
+                while ($i -lt $Text.Length -and $Text[$i] -ne "`n") { $i++ }
+                continue
+            }
+            # Multi-line comment: skip to closing */
+            if ($c -eq '/' -and ($i + 1) -lt $Text.Length -and $Text[$i + 1] -eq '*') {
+                $i += 2
+                while ($i -lt $Text.Length) {
+                    if ($Text[$i] -eq '*' -and ($i + 1) -lt $Text.Length -and $Text[$i + 1] -eq '/') {
+                        $i += 2
+                        break
+                    }
+                    $i++
+                }
+                continue
+            }
+        }
+        [void]$result.Append($c)
+        $i++
+    }
+    $resultStr = $result.ToString()
+    # Remove trailing commas before } or ]
+    $resultStr = $resultStr -replace ',\s*([}\]])', '$1'
+    return $resultStr
+}
+
+# Our own settings.json is valid JSON - parse directly
+$newSettings = Get-Content "$scriptDir\settings.json" -Raw | ConvertFrom-Json
+
+# If the user has existing settings, merge instead of overwrite.
+# Islands Dark theme keys win so updated fixes are applied correctly.
+# Non-theme user settings are preserved.
 if (Test-Path $settingsFile) {
-    $backupFile = "$settingsFile.pre-islands-dark"
+    $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $backupFile = "$settingsFile.pre-islands-dark.$timestamp"
     Copy-Item $settingsFile $backupFile -Force
     Write-Host "Existing settings.json backed up to:" -ForegroundColor Yellow
     Write-Host "   $backupFile"
     Write-Host "   You can restore your old settings from this file if needed."
+
+    try {
+        $existingRaw = Get-Content $settingsFile -Raw
+        # Try direct parse first; fall back to JSONC stripping for user files with comments
+        try {
+            $existingSettings = $existingRaw | ConvertFrom-Json
+        } catch {
+            $existingSettings = (Strip-Jsonc $existingRaw) | ConvertFrom-Json
+        }
+
+        # Start with user's existing settings, then overlay Islands Dark theme settings.
+        # Theme keys win so fixes/updates are applied correctly.
+        $mergedSettings = [ordered]@{}
+
+        # First, copy all existing user settings
+        $existingSettings.PSObject.Properties | ForEach-Object {
+            $mergedSettings[$_.Name] = $_.Value
+        }
+
+        # Then overlay Islands Dark settings (theme keys win)
+        $newSettings.PSObject.Properties | ForEach-Object {
+            $mergedSettings[$_.Name] = $_.Value
+        }
+
+        # Deep merge custom-ui-style.stylesheet so user's extra CSS rules survive
+        # but Islands Dark's selectors always get the latest fixes
+        $stylesheetKey = 'custom-ui-style.stylesheet'
+        if ($existingSettings.$stylesheetKey -and $newSettings.$stylesheetKey) {
+            $mergedStylesheet = [ordered]@{}
+            # Start with user's custom CSS selectors
+            $existingSettings.$stylesheetKey.PSObject.Properties | ForEach-Object {
+                $mergedStylesheet[$_.Name] = $_.Value
+            }
+            # Overlay Islands Dark selectors (theme wins for its own selectors)
+            $newSettings.$stylesheetKey.PSObject.Properties | ForEach-Object {
+                $mergedStylesheet[$_.Name] = $_.Value
+            }
+            $mergedSettings[$stylesheetKey] = [PSCustomObject]$mergedStylesheet
+        }
+
+        [PSCustomObject]$mergedSettings | ConvertTo-Json -Depth 100 | Set-Content $settingsFile
+        Write-Host "Settings merged (your non-theme settings preserved, theme settings updated)" -ForegroundColor Green
+    } catch {
+        Write-Host "Could not parse existing settings.json - leaving it untouched" -ForegroundColor Yellow
+        Write-Host "   Your backup is at: $backupFile" -ForegroundColor DarkGray
+        Write-Host "   To apply Islands Dark settings, manually merge from: $scriptDir\settings.json" -ForegroundColor DarkGray
+        Write-Host "   Error: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+} else {
+    Copy-Item "$scriptDir\settings.json" $settingsFile -Force
+    Write-Host "Islands Dark settings applied" -ForegroundColor Green
 }
 
-# Copy Islands Dark settings
-Copy-Item "$scriptDir\settings.json" $settingsFile -Force
-Write-Host "Islands Dark settings applied" -ForegroundColor Green
+# Save pre-install state for clean uninstall (only on first install)
+$stateFile = Join-Path $settingsDir ".islands-dark-state.json"
+if (-not (Test-Path $stateFile)) {
+    $state = [ordered]@{
+        previousColorTheme = "Default Dark+"
+        previousIconTheme  = ""
+        customUiStyleWasInstalled = $false
+        settingsBackupPath = ""
+        fonts = @{}
+        installedAt = (Get-Date -Format "o")
+    }
+
+    # Read previous theme from the backup (pre-merge settings)
+    if ($backupFile -and (Test-Path $backupFile)) {
+        try {
+            $backupRaw = Get-Content $backupFile -Raw
+            try { $backupSettings = $backupRaw | ConvertFrom-Json }
+            catch { $backupSettings = (Strip-Jsonc $backupRaw) | ConvertFrom-Json }
+
+            if ($backupSettings.'workbench.colorTheme') {
+                $state.previousColorTheme = $backupSettings.'workbench.colorTheme'
+            }
+            if ($backupSettings.'workbench.iconTheme') {
+                $state.previousIconTheme = $backupSettings.'workbench.iconTheme'
+            }
+        } catch {}
+        $state.settingsBackupPath = $backupFile
+    }
+
+    # Check if Custom UI Style was already installed
+    $cuiExtDirs = Get-ChildItem "$env:USERPROFILE\.vscode\extensions\subframe7536.custom-ui-style-*" -Directory -ErrorAction SilentlyContinue
+    if ($cuiExtDirs) {
+        $state.customUiStyleWasInstalled = $true
+    }
+
+    # Track which fonts were installed (use pre-install check from Step 3)
+    $fontState = [ordered]@{}
+    foreach ($key in $fontPreExistence.Keys) {
+        $fontState[$key] = [ordered]@{
+            wasPresentBeforeInstall = $fontPreExistence[$key].wasPresentBeforeInstall
+            installedPath = $fontPreExistence[$key].installedPath
+        }
+    }
+    $state.fonts = [PSCustomObject]$fontState
+
+    [PSCustomObject]$state | ConvertTo-Json -Depth 10 | Set-Content $stateFile
+    Write-Host "Pre-install state saved for clean uninstall" -ForegroundColor DarkGray
+}
 
 Write-Host ""
 Write-Host "Step 5: Enabling Custom UI Style..."
@@ -160,9 +322,17 @@ Write-Host "   Relaunching VS Code..." -ForegroundColor Cyan
 Start-Process "code" -ErrorAction SilentlyContinue
 
 Write-Host ""
-Write-Host "Done!" -ForegroundColor Green
+Write-Host "=========================================" -ForegroundColor Cyan
+Write-Host " IMPORTANT: One more step required!" -ForegroundColor Cyan
+Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "If the CSS customizations are not applied, open the Command Palette" -ForegroundColor Yellow
-Write-Host "(Ctrl+Shift+P) and run: Custom UI Style: Reload" -ForegroundColor Yellow
+Write-Host "To activate the custom UI styling:" -ForegroundColor Yellow
+Write-Host "   1. Wait for VS Code to finish loading"
+Write-Host "   2. Press Ctrl+Shift+P to open the Command Palette"
+Write-Host "   3. Type: Custom UI Style: Reload" -ForegroundColor White
+Write-Host "   4. Press Enter and VS Code will reload with the new styling"
+Write-Host ""
+Write-Host "You only need to do this once (or after VS Code updates)." -ForegroundColor DarkGray
+Write-Host ""
 
 Start-Sleep -Seconds 3

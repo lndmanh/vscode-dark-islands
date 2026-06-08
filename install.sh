@@ -46,14 +46,6 @@ else
     exit 1
 fi
 
-# Remove extensions.json so VS Code rebuilds it cleanly on next launch
-# (previous versions of this script wrote invalid content to this file)
-EXT_JSON="$HOME/.vscode/extensions/extensions.json"
-if [ -f "$EXT_JSON" ]; then
-    rm -f "$EXT_JSON"
-    echo -e "${GREEN}✓ Cleared extensions.json (VS Code will rebuild it)${NC}"
-fi
-
 echo ""
 echo "🔧 Step 2: Installing Custom UI Style extension..."
 if code --install-extension subframe7536.custom-ui-style --force; then
@@ -65,10 +57,22 @@ fi
 
 echo ""
 echo "🔤 Step 3: Installing Bear Sans UI fonts..."
+
+# Track font pre-existence before installing
+FONT_PRE_STATE=""
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS
     FONT_DIR="$HOME/Library/Fonts"
     echo "   Installing fonts to: $FONT_DIR"
+    for f in "$SCRIPT_DIR/fonts/"*.otf; do
+        [ -f "$f" ] || continue
+        fname=$(basename "$f")
+        if [ -f "$FONT_DIR/$fname" ]; then
+            FONT_PRE_STATE="${FONT_PRE_STATE}\"${fname}\": {\"wasPresentBeforeInstall\": true, \"installedPath\": \"${FONT_DIR}/${fname}\"},"
+        else
+            FONT_PRE_STATE="${FONT_PRE_STATE}\"${fname}\": {\"wasPresentBeforeInstall\": false, \"installedPath\": \"${FONT_DIR}/${fname}\"},"
+        fi
+    done
     cp "$SCRIPT_DIR/fonts/"*.otf "$FONT_DIR/" 2>/dev/null || true
     echo -e "${GREEN}✓ Fonts installed to Font Book${NC}"
     echo "   Note: You may need to restart applications to use the new fonts"
@@ -77,6 +81,15 @@ elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
     FONT_DIR="$HOME/.local/share/fonts"
     mkdir -p "$FONT_DIR"
     echo "   Installing fonts to: $FONT_DIR"
+    for f in "$SCRIPT_DIR/fonts/"*.otf; do
+        [ -f "$f" ] || continue
+        fname=$(basename "$f")
+        if [ -f "$FONT_DIR/$fname" ]; then
+            FONT_PRE_STATE="${FONT_PRE_STATE}\"${fname}\": {\"wasPresentBeforeInstall\": true, \"installedPath\": \"${FONT_DIR}/${fname}\"},"
+        else
+            FONT_PRE_STATE="${FONT_PRE_STATE}\"${fname}\": {\"wasPresentBeforeInstall\": false, \"installedPath\": \"${FONT_DIR}/${fname}\"},"
+        fi
+    done
     cp "$SCRIPT_DIR/fonts/"*.otf "$FONT_DIR/" 2>/dev/null || true
     fc-cache -f 2>/dev/null || true
     echo -e "${GREEN}✓ Fonts installed${NC}"
@@ -84,6 +97,8 @@ else
     echo -e "${YELLOW}⚠️  Could not detect OS type for automatic font installation${NC}"
     echo "   Please manually install the fonts from the 'fonts/' folder"
 fi
+# Remove trailing comma from font state
+FONT_PRE_STATE="${FONT_PRE_STATE%,}"
 
 echo ""
 echo "⚙️  Step 4: Applying VS Code settings..."
@@ -95,18 +110,71 @@ fi
 mkdir -p "$SETTINGS_DIR"
 SETTINGS_FILE="$SETTINGS_DIR/settings.json"
 
-# Backup existing settings if they exist
+# Backup existing settings if they exist, then merge
 if [ -f "$SETTINGS_FILE" ]; then
-    BACKUP_FILE="$SETTINGS_FILE.pre-islands-dark"
+    TIMESTAMP=$(date +"%Y%m%d-%H%M%S")
+    BACKUP_FILE="$SETTINGS_FILE.pre-islands-dark.$TIMESTAMP"
     cp "$SETTINGS_FILE" "$BACKUP_FILE"
     echo -e "${YELLOW}⚠️  Existing settings.json backed up to:${NC}"
     echo "   $BACKUP_FILE"
     echo "   You can restore your old settings from this file if needed."
+
+    if command -v jq &> /dev/null; then
+        # Merge: user's non-theme settings are preserved, Islands Dark theme keys win
+        # This ensures updated fixes are applied while keeping user customizations
+        if MERGED=$(jq -s '.[0] * .[1]' "$SETTINGS_FILE" "$SCRIPT_DIR/settings.json" 2>/dev/null); then
+            echo "$MERGED" > "$SETTINGS_FILE"
+            echo -e "${GREEN}✓ Settings merged (your non-theme settings preserved, theme settings updated)${NC}"
+        else
+            echo -e "${YELLOW}⚠️  Could not parse existing settings.json - leaving it untouched${NC}"
+            echo "   Your backup is at: $BACKUP_FILE"
+            echo "   To apply Islands Dark settings, manually merge from: $SCRIPT_DIR/settings.json"
+        fi
+    else
+        echo -e "${YELLOW}⚠️  jq not found - cannot merge settings safely${NC}"
+        echo "   Your backup is at: $BACKUP_FILE"
+        echo "   To apply Islands Dark settings, manually merge from: $SCRIPT_DIR/settings.json"
+        echo "   Or install jq (https://jqlang.github.io/jq/) and re-run this script"
+    fi
+else
+    # No existing settings - just copy
+    cp "$SCRIPT_DIR/settings.json" "$SETTINGS_FILE"
+    echo -e "${GREEN}✓ Islands Dark settings applied${NC}"
 fi
 
-# Copy Islands Dark settings
-cp "$SCRIPT_DIR/settings.json" "$SETTINGS_FILE"
-echo -e "${GREEN}✓ Islands Dark settings applied${NC}"
+# Save pre-install state for clean uninstall (only on first install)
+STATE_FILE="$SETTINGS_DIR/.islands-dark-state.json"
+if [ ! -f "$STATE_FILE" ]; then
+    PREV_THEME="Default Dark+"
+    PREV_ICON_THEME=""
+    CUI_WAS_INSTALLED="false"
+    BACKUP_PATH="${BACKUP_FILE:-}"
+
+    # Read previous theme from backup
+    if [ -n "$BACKUP_PATH" ] && [ -f "$BACKUP_PATH" ]; then
+        if command -v jq &> /dev/null; then
+            PREV_THEME=$(jq -r '."workbench.colorTheme" // "Default Dark+"' "$BACKUP_PATH" 2>/dev/null || echo "Default Dark+")
+            PREV_ICON_THEME=$(jq -r '."workbench.iconTheme" // ""' "$BACKUP_PATH" 2>/dev/null || echo "")
+        fi
+    fi
+
+    # Check if Custom UI Style was already installed
+    if ls "$HOME/.vscode/extensions/subframe7536.custom-ui-style-"* 1>/dev/null 2>&1; then
+        CUI_WAS_INSTALLED="true"
+    fi
+
+    cat > "$STATE_FILE" << STATEEOF
+{
+  "previousColorTheme": "$PREV_THEME",
+  "previousIconTheme": "$PREV_ICON_THEME",
+  "customUiStyleWasInstalled": $CUI_WAS_INSTALLED,
+  "settingsBackupPath": "$BACKUP_PATH",
+  "fonts": {${FONT_PRE_STATE}},
+  "installedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+STATEEOF
+    echo -e "${GREEN}✓ Pre-install state saved for clean uninstall${NC}"
+fi
 
 echo ""
 echo "🚀 Step 5: Enabling Custom UI Style..."
@@ -146,4 +214,15 @@ echo "   Reloading VS Code..."
 code --reload-window 2>/dev/null || code . 2>/dev/null || true
 
 echo ""
-echo -e "${GREEN}Done! 🏝️${NC}"
+echo -e "${CYAN}=========================================${NC}"
+echo -e "${CYAN} IMPORTANT: One more step required!${NC}"
+echo -e "${CYAN}=========================================${NC}"
+echo ""
+echo -e "${YELLOW}To activate the custom UI styling:${NC}"
+echo "   1. Wait for VS Code to finish loading"
+echo "   2. Press Cmd+Shift+P (macOS) or Ctrl+Shift+P (Linux)"
+echo -e "   3. Type: ${GREEN}Custom UI Style: Reload${NC}"
+echo "   4. Press Enter and VS Code will reload with the new styling"
+echo ""
+echo "   You only need to do this once (or after VS Code updates)."
+echo ""

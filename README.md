@@ -78,7 +78,14 @@ The scripts will automatically:
 - ✅ Install the Custom UI Style extension
 - ✅ Install Bear Sans UI fonts
 - ✅ Back up your existing settings and apply Islands Dark settings
-- ✅ Enable Custom UI Style and reload VS Code
+- ✅ Reload VS Code
+
+> **Important:** After the script finishes and VS Code reloads, you need to activate the CSS styling once:
+> 1. Press `Cmd+Shift+P` (macOS) or `Ctrl+Shift+P` (Windows/Linux)
+> 2. Type **Custom UI Style: Reload** and press Enter
+> 3. VS Code will reload with the full theme applied
+>
+> You only need to do this once (or after VS Code updates).
 
 > **Note:** IBM Plex Mono and FiraCode Nerd Font Mono must be installed separately (the script will remind you).
 
@@ -111,6 +118,37 @@ To use it in your NixOS or Home Manager configuration, add it to your flake inpu
 ```
 
 > **Note:** The Nix flake automatically includes the **Custom UI Style** extension, **Seti Folder** icon theme, and all required fonts (**Bear Sans UI**, **IBM Plex Mono**, and **FiraCode Nerd Font**). It will also copy the recommended `settings.json` on the first run.
+
+### Cursor (VS Code fork)
+
+Islands Dark works on [Cursor](https://cursor.com/) with two small adaptations baked into a dedicated set of scripts and a `settings-cursor.json` variant.
+
+#### One-Liner Install (Cursor, macOS/Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bwya77/vscode-dark-islands/main/bootstrap-cursor.sh | bash
+```
+
+#### Manual Clone Install (Cursor, macOS/Linux)
+
+```bash
+git clone https://github.com/bwya77/vscode-dark-islands.git islands-dark
+cd islands-dark
+./install-cursor.sh
+```
+
+The Cursor installer is a parallel of `install.sh` that targets Cursor-specific paths (`~/.cursor/extensions/`, `~/Library/Application Support/Cursor/User/` on macOS, `~/.config/Cursor/User/` on Linux) and uses the `cursor` CLI instead of `code`. It applies `settings-cursor.json`, which is identical to `settings.json` plus two adjustments required for Cursor:
+
+- `"custom-ui-style.webview.enable": false` — Cursor's extension detail panel renders inside a webview with a stricter Content-Security-Policy than VS Code's; leaving the webview patch enabled triggers a CSP error and a blank panel ([upstream issue](https://github.com/subframe7536/vscode-custom-ui-style#fail-to-render-panel)).
+- A rule hiding `.titlebar-left .action-item:has(.codicon-panel-left)` — Cursor renders a "Toggle Primary Side Bar" button at the top-left of the title bar that overlaps the sidebar's rounded corner. `Cmd+B` continues to toggle the sidebar.
+
+> **Note:** Custom UI Style is not officially supported on Cursor, but works reliably from version `0.5.6` onwards (see [issue #40](https://github.com/subframe7536/vscode-custom-ui-style/issues/40)). After every Cursor update you'll need to re-run **Custom UI Style: Reload** from the command palette to reapply the CSS injection. The "corrupt installation" warning that appears after the first reload is expected and can be dismissed with **Don't Show Again**.
+
+To uninstall:
+
+```bash
+./uninstall-cursor.sh
+```
 
 ### Manual Installation
 
@@ -292,15 +330,23 @@ cd islands-dark
 irm https://raw.githubusercontent.com/bwya77/vscode-dark-islands/main/uninstall.ps1 | iex
 ```
 
-The uninstall script will:
-- Restore your previous settings from the `settings.json.pre-islands-dark` backup
-- Remove the Islands Dark theme extension
-- Unregister the extension from VS Code
+**Cursor (macOS/Linux):**
+```bash
+# If you still have the repo cloned:
+cd islands-dark
+./uninstall-cursor.sh
+```
 
-After running the script, you'll need to:
-1. Open **Command Palette** (`Cmd+Shift+P` / `Ctrl+Shift+P`) and run **Custom UI Style: Disable**
-2. Open **Command Palette** and search **Preferences: Color Theme** to select a new theme
-3. Reload VS Code
+The uninstall script will:
+- ✅ Restore your previous `settings.json` from the backup (or surgically remove Islands Dark keys if no backup exists)
+- ✅ Remove the Islands Dark theme extension
+- ✅ Restore your previous color theme and icon theme
+- ✅ Remove Custom UI Style's CSS patches from VS Code's workbench files
+- ✅ Uninstall Custom UI Style (only if it wasn't installed before Islands Dark)
+- ✅ Remove Bear Sans UI fonts (only if they weren't installed before Islands Dark)
+- ✅ Clean up state files and reload VS Code
+
+Everything is fully automated — no manual steps required after the script runs.
 
 ## Credits
 
